@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch
 import random
 import matplotlib.pyplot as plt
+import numpy as np
 #%%
 def extract_symbols(data):
     symbols = set()
@@ -61,16 +62,27 @@ g = torch.Generator().manual_seed(2147483647)
 C = torch.randn((len(symbols),n_embd), generator=g)
 
 #%%
-W1 = torch.randn((n_embd * repetition_block, n_hidden), generator=g)
-b1 = torch.rand((1,n_hidden), generator=g)
+W1 = torch.randn((n_embd * repetition_block, n_hidden), generator=g) * (5/3) / (n_embd * repetition_block)**(0.5)
+b1 = torch.rand((1,n_hidden), generator=g) * 0.01
 
-W2 = torch.randn((n_hidden, len(symbols)), generator=g)
-b2 = torch.randn((1, len(symbols)), generator=g)
+W2 = torch.randn((n_hidden, len(symbols)), generator=g) * 0.1 # WE USE * 0.1 TO SQUASH DOWN
+                                                              # DOWN OUR LOGITS AND BRING THE 
+                                                              # INITIAL LOSS CLOSER TO EACH
+                                                              # EXPECTED VALUE
+b2 = torch.randn((1, len(symbols)), generator=g) * 0
 
 parameters = [C,W1,b1,W2,b2]
 
 for p in parameters:
     p.requires_grad = True
+#%%
+print('Expected loss: ', -torch.log(torch.tensor(1/27)).item())
+# 1/27 BECAUSE AT INITIALIZATION, WE EXPECT THE NEURAL NET TO DO SOMETHING RANDOM.
+# THIS MEANS THAT THE PROBABILITY FOR THE NEURAL NET TO PREDICT THE CORRECT OUTPUT
+# SHOULD BE 1/27.
+# THEN BY USING THE OUR NEGATIVE LOG LIKELIHOOD COST FUNCTIO, WE FIND THE VALUE
+# THAT THE INITIAL LOSS FUNCTION SHOULD HAVE.
+
 
 # %%
 # LEARNING RATE SEARCH
@@ -80,15 +92,15 @@ losses = []
 
 #%%
 mbatch_size = 32
-epochs = len(space)
+epochs = 20_000
 for epoch in range(epochs):
     # IMPLEMENT MINIBATCH
     ix = torch.randint(0, Xtr.shape[0], (mbatch_size,), generator=g)
     emb = C[Xtr[ix]].view(Xtr[ix].shape[0], 
                           repetition_block * n_embd ) # DIMS = (32, 3, n_embd)
 
-
-    h = torch.tanh(emb @ W1 + b1)
+    hpre = emb @ W1 + b1
+    h = torch.tanh(hpre)
     logits = h @ W2 + b2
     loss = F.cross_entropy(logits, Ytr[ix])
     print(f'Epoch: {epoch+1} --> loss: {loss:.4f}')
@@ -104,7 +116,7 @@ for epoch in range(epochs):
     # BACKWARD PASSES THAN TO DETERMINE THE GRADIENT'S VALUE VERY ACCURETELY 
     # AND DO FEWER BACKWARD PASSES.
 
-    lr = 0.25 if epoch < 100_000 else 0.025
+    lr = 0.25 if epoch < 18_000 else 0.025
     for p in parameters:
         # p.data -= lrs[epoch] * p.grad FOR LR SEARCH
         p.data -= lr * p.grad
@@ -133,22 +145,51 @@ with torch.no_grad():
 # %%
 # SAMPLE FROM THE MODEL
 # ITERERATIVELY GIVE AN INPUT TO THE MODEL UNTIL YOU GET A '.'
+g = torch.Generator().manual_seed(2147483647 + 10)
+
 itos = {i:s for i,s in enumerate(symbols)}
 with torch.no_grad():
-    for i in range(10):
+    for i in range(20):
         name = ''
+        input = [0]*repetition_block
         while True:
-            input = [0.0]*repetition_block
-            input_emb = C[input].view(1, repetition_block * n_embd)
-            in_h = torch.tanh(input_emb @ W1 + b1)
-
-            logits = in_h @ W2 + b2
-            probs = F.softmax(logits, dim=1)
-
-            ix = torch.multinomial(probs, num_samples=1, replacement=True, generator=g).item()
+            emb = C[input]
+            hpre = emb.view(1, -1) @ W1 + b1
+            h = torch.tanh(hpre)
+            logits = h @ W2
+            probs = F.softmax(logits, dim =1)
+            ix = torch.multinomial(probs, num_samples=1, generator=g).item()
             name += itos[ix]
-            if itos[ix] == '.':
+            input = input[1:] + [ix]
+            if ix ==0:
                 break
         print(name)
 
 # %%
+x = torch.randn((32, 30))
+W = torch.randn((30, 200)) * 5/3 / 30**(0.5)
+y = x@W
+plt.figure(figsize=(20,5))
+plt.subplot(121)
+plt.hist(x.view(-1).tolist(), bins = 40, density= True, label='x')
+plt.legend()
+plt.subplot(122)
+plt.hist(y.view(-1).tolist(), bins = 40, density= True, label='y')
+plt.legend()
+# %%
+print(torch.mean(x.view(-1)))
+print(torch.std(x.view(-1)))
+#%%
+print(torch.mean(W.view(-1)))
+print(torch.std(W.view(-1)))
+# %%
+print(torch.mean(y.view(-1)))
+print(torch.std(y.view(-1)))
+# %%
+print((torch.randn(10000)).std())
+# %%
+
+print(hpre.view(-1).tolist())
+plt.imshow(h.abs() > 0.99, cmap='grey') # BLACK == FALSE
+# plt.hist(hpre.view(-1).tolist(), bins=50)
+# plt.hist(np.tanh((hpre.view(-1).tolist())))
