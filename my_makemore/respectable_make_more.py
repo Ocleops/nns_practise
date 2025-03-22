@@ -22,13 +22,21 @@ def build_dataset(data, symbols, prediction_block):
 
     return torch.tensor(X), torch.tensor(Y)
 
+def act_sanity_check(h, limit = 0.99):
+    plt.figure(figsize=(16,9))
+    plt.subplot(221)
+    plt.hist(h.view(-1).tolist(), bins=50)
+    plt.subplot(222)
+    plt.imshow(h.abs()>0.99, cmap='grey') # WHITE IS TRUE
+    print((h.view(-1).abs() > 0.99).float().mean())
+
 # %%
 data = open('names.txt', 'r').read().splitlines()
 symbols =['.'] + sorted(list(set(''.join(data))))
 repetition_block = 3
 
-# random.seed(42)
-# random.shuffle(data)
+random.seed(42)
+random.shuffle(data)
 
 n1 = int(len(data) * 0.8)
 n2 = int(len(data) * 0.9)
@@ -46,10 +54,16 @@ n_hidden = 200
 
 C = torch.randn((len(symbols), emb_dim), generator=g) # GIVE A SYMBOL, TAKE AN EMBEDDING
 W1 = torch.randn((emb_dim * repetition_block, n_hidden), generator=g) * (5/3) /(emb_dim * repetition_block)**0.5
-b1 = torch.randn((1, n_hidden), generator=g)
-W2 = torch.randn((n_hidden, len(symbols)), generator=g) * 0.1
+# b1 = torch.randn((1, n_hidden), generator=g) # IN BATCH NORM b1 IS USELESS BECAUSE WE ARE
+                                               # ADDING A DIFFERENT BIAS 
+W2 = torch.randn((n_hidden, len(symbols)), generator=g) * 0.01
+gammas = torch.randn((1, n_hidden), generator=g)
+betas = torch.randn((1,n_hidden), generator=g)
 
-parameters = [C,W1,b1, W2]
+E_running = torch.randn((1, n_hidden), generator=g) # SHIFT
+S_running = torch.randn((1, n_hidden), generator=g) # GAIN
+
+parameters = [C,W1, W2, betas, gammas] # PUT b1 BACK HERE IF YOU UNCOMMENT IT.
 for p in parameters:
   p.requires_grad = True
 #%% 
@@ -59,8 +73,22 @@ for i in range(max_steps):
     ix = torch.randint(low=0, high=Xtr.shape[0], size=(mini_batch,), generator=g)
     Xb, Yb = Xtr[ix], Ytr[ix]
     embds = C[Xb]
-    hpre = embds.view(mini_batch, -1) @ W1 + b1
-    h = torch.tanh(hpre)
+
+    hpre = embds.view(mini_batch, -1) @ W1 # + b1
+
+    # IMPLEMENTING BATCH NORM
+    E = torch.mean(hpre, dim=0, keepdim=True)
+    sigma = torch.std(hpre, dim=0, keepdim=True)
+    x_hat = (hpre - E)/sigma
+
+    y = gammas * x_hat + betas
+    h = torch.tanh(y)
+    # act_sanity_check(h, limit = 0.99)
+
+    with torch.no_grad():
+        E_running = 0.999 * E_running + 0.001 * E 
+        S_running = 0.999 * S_running + 0.001 * sigma
+
     logits = h @ W2
     loss = F.cross_entropy(logits, Yb)
     # # I AM ALSO INCLUDING THE MANUAL IMPLEMENTATION OF THE LOSS HERE!!!
@@ -89,15 +117,24 @@ for i in range(max_steps):
 # TRAIN LOSS
 with torch.no_grad():
     tr_emnds = C[Xtr].view(len(Xtr), emb_dim*repetition_block)
-    tr_h = torch.tanh(tr_emnds @ W1 + b1)
+    tr_hpre = tr_emnds @ W1 
+    xtr_hat = (tr_hpre - E_running)/S_running
+    ytr = gammas * xtr_hat + betas
+    tr_h = torch.tanh(ytr)
+
     tr_logits = tr_h @ W2 
     tr_loss = F.cross_entropy(tr_logits, Ytr)
     print(tr_loss.item())
+
 # %%
 # DEV LOSS
 with torch.no_grad():
     dev_embds = C[Xdev].view(len(Xdev), emb_dim*repetition_block)
-    dev_h = torch.tanh(dev_embds @ W1 + b1)
+    dev_hpre = dev_embds @ W1 
+    xdev_hat = (dev_hpre - E_running)/S_running
+    ydev = gammas * xdev_hat + betas
+    dev_h = torch.tanh(ydev)
+    
     dev_logits = dev_h @ W2 
     dev_loss = F.cross_entropy(dev_logits, Ydev)
     print(dev_loss.item())
@@ -112,9 +149,12 @@ with torch.no_grad():
         input = [0]*repetition_block
         while True:
             emb = C[input]
-            hpre = emb.view(1, -1) @ W1 + b1
-            h = torch.tanh(hpre)
-            logits = h @ W2
+            input_hpre = emb.view(1, -1) @ W1 
+            input_hat = (input_hpre - E_running)/S_running
+            input_y = gammas * input_hat + betas
+            input_h = torch.tanh(input_y)
+
+            logits = input_h @ W2
             probs = F.softmax(logits, dim =1)
             ix = torch.multinomial(probs, num_samples=1, generator=g).item()
             name += itos[ix]
@@ -122,4 +162,8 @@ with torch.no_grad():
             if ix ==0:
                 break
         print(name)
+# %%
+print(E_running)
+# %%
+print(E)
 # %%
