@@ -162,7 +162,7 @@ with torch.no_grad():
             layer.w *= 5/3
 
 # %%
-max_steps = 1#200_000
+max_steps = 200_000
 for i in range(max_steps):
     ix = torch.randint(low=0, high=Xtr.shape[0], size=(batch_size,), generator=g)
     Xb, Yb = Xtr[ix], Ytr[ix]
