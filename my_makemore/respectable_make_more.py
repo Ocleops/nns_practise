@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 def build_dataset(data, symbols, prediction_block): 
     stoi = {s:i for i,s in enumerate(symbols)}
-    itos = {i:s for i,s in enumerate(symbols)}
+    # itos = {i:s for i,s in enumerate(symbols)}
 
     X = []
     Y = []
