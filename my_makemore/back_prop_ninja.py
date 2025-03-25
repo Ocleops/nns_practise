@@ -137,29 +137,45 @@ dcounts2 = counts_sum_inv * dprobs
 dcounts = dcounts1 + dcounts2 
 
 dnorm_logits = norm_logits.exp() * dcounts
-dlogit_maxes = - dnorm_logits.sum(dim = 1, keepdim = True)
-
 # THE dlogits SUFFERS FROM THE SAME CONDITION AS dcounts. 
 # WE HAVE TO CALCULATE ALL THE GRADIENTS ALL THE WAY AGAIN.
-dlogits1 = torch.zeros((logits.shape[0], logits.shape[1]))
-for i in range(n):
-  dlogits1[i,logits.max(1).indices[i]] = dlogit_maxes[i].item()
+dlogits = dnorm_logits.clone() 
+dlogit_maxes = (-dnorm_logits).sum(1, keepdim=True)
+dlogits += F.one_hot(logits.max(1).indices, num_classes=27) * dlogit_maxes
 
-dlogits = torch.ones((logits.shape[0], logits.shape[1])) * dnorm_logits - dlogits1
-
+# LINEAR LAER BACKWARD
 db2 = dlogits.sum(dim=0)
-#%%
-dW2 = torch.zeros((W2.shape[0], W2.shape[1]))
+dW2 = h.T @ dlogits
+dh = dlogits @ W2.T
+# BATCH NORM LAYER
+dhpreact = (1.0 - h**2) * dh
+dbngain = (dhpreact * bnraw).sum(dim=0, keepdims = True)
+dbnraw = bngain * dhpreact
+dbnbias = dhpreact.sum(dim=0, keepdim = True)
 
-for k in range(n):
-  for i in range(dW2.shape[1]):
-    dW2[:,i] += h[k, :] * dlogits[k,i]
+dbnvar_inv = (dbnraw * bndiff).sum(dim = 0, keepdim = True) 
+dbndiff = dbnraw * bnvar_inv
+dbnvar = - (0.5 * ((bnvar + 1e-5)**-1.5)) * dbnvar_inv
+# dbndiff2 = dbnvar.sum(0, keepdim = True) * 1/(n-1) 
+dbndiff2 = (1.0/(n-1))*torch.ones_like(bndiff2) * dbnvar
+dbndiff += (2*bndiff) * dbndiff2
+dhprebn = dbndiff.clone() # IF YOU DO NOT USE CLONE, BUGS ARE COMING UP!!!!
+dbnmeani = (- dbndiff).sum(dim=0, keepdim=True)
+dhprebn += 1/n * dbnmeani 
+dW1 = embcat.T @ dhprebn
+dembcat = dhprebn @ W1.T
+db1 = dhprebn.sum(dim=0)
+
+# TO GET THE GRADIENTS FOR THE EMBEDINGS, THINK LIKE THIS.
+# FIRST UNDERSTAND HOW PYTORCH EXTRACTS THE TENSOR THAT YOU WANT WITH THE COMMAND C[Xb].
+# AS YOU CAN SEE BELOW, IT IS ESSENTIALLY A MATRIX MULTIPLICATION.
+# YOU KNOW HOW TO BACKPROPAGATE THROUGH MATRIX MULTIPLICATIONS.
+# SO THE REST ARE HISTORY
+hot_vec = F.one_hot(Xb, num_classes=27).float()
+# result = (hot_vec.view(-1, vocab_size) @ C)#.view(n, block_size, n_embd)
+dC = hot_vec.view(-1, vocab_size).T @ dembcat.view(n*block_size,n_embd) 
 
 
-
-print('W2: ', W2.shape)
-print('dlogits: ',logits.shape)
-print('h: ', h.shape)
 #%%
 cmp('logprobs', dlogprobs , logprobs)
 cmp('probs', dprobs, probs)
@@ -171,6 +187,21 @@ cmp('logit_maxes', dlogit_maxes, logit_maxes)
 cmp('logits', dlogits, logits)
 cmp('b2', db2, b2)
 cmp('W2', dW2, W2)
+cmp('h', dh, h)
+cmp('hpreact', dhpreact, hpreact)
+cmp('bngain', dbngain, bngain)
+cmp('bnraw', dbnraw, bnraw)
+cmp('bnbias', dbnbias, bnbias)
+cmp('bnvar_inv', dbnvar_inv, bnvar_inv)
+cmp('bndiff', dbndiff, bndiff)
+cmp('bnvar', dbnvar, bnvar)
+cmp('bndiff2',dbndiff2, bndiff2)
+cmp('hprebn', dhprebn, hprebn)
+cmp('bnmeani', dbnmeani, bnmeani)
+cmp('W1', dW1, W1)
+cmp('embcat', dembcat, embcat)
+cmp('b1', db1, b1)
+cmp('C', dC, C)
 # %%
 print(dcounts[0])
 print(counts.grad[0])
