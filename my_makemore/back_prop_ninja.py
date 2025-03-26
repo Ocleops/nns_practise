@@ -203,6 +203,194 @@ cmp('embcat', dembcat, embcat)
 cmp('b1', db1, b1)
 cmp('C', dC, C)
 # %%
-print(dcounts[0])
-print(counts.grad[0])
+# CALCULATE THE LOSS OF THE CROSS ENTROPY DIRECTLY
+dlogits = 1/n * (F.softmax(logits, dim=1))
+dlogits[torch.arange(n), Yb] -= 1/n 
+cmp('logits', dlogits, logits)
+
+#%%
+# CALCULATE THE BACKPROP FOR THE BATCH NORM
+
+# INPUT --> hprebn
+# OUTPUT --> hpreact
+# μ_Β = mean_over_minibatch(input)
+# calculate variance of the minibatch
+# x_hat = (x-μ)/sqrt(var - ε)
+# y <-- γx_hat + β (γ,β learnable parameters)
+
+# FIND dhprebn when you know hpreact
+
+# y <-- γ* ((hprebn-μ)/sqrt(var - ε)) + β
+
+# bnmeani = 1/n*hprebn.sum(0, keepdim=True)
+# bndiff = hprebn - bnmeani
+# bndiff2 = bndiff**2
+# bnvar = 1/(n-1)*(bndiff2).sum(0, keepdim=True) # note: Bessel's correction (dividing by n-1, not n)
+# bnvar_inv = (bnvar + 1e-5)**-0.5
+# bnraw = bndiff * bnvar_inv
+# hpreact = bngain * bnraw + bnbias
+
+# dhprebn = bngain*bnvar_inv/n * (n * dhpreact - hpreact.sum(dim=0, keepdim = True) - n/(n-1) * bnraw * (dhpreact * bnraw).sum(dim=0, keepdim = True)) 
+
+dhprebn = bngain*bnvar_inv/n * (n*dhpreact - dhpreact.sum(0) - n/(n-1) * bnraw * (dhpreact * bnraw).sum(0))
+
+cmp('hprebn', dhprebn, hprebn)
+
+
+# %%
+
+# BRING IT ALL TOGETHER
+
+n_embd = 10 # the dimensionality of the character embedding vectors
+n_hidden = 64 # the number of neurons in the hidden layer of the MLP
+
+g = torch.Generator().manual_seed(2147483647) # for reproducibility
+C  = torch.randn((vocab_size, n_embd),            generator=g)
+# Layer 1
+W1 = torch.randn((n_embd * block_size, n_hidden), generator=g) * (5/3)/((n_embd * block_size)**0.5)
+b1 = torch.randn(n_hidden,                        generator=g) * 0.1 # using b1 just for fun, it's useless because of BN
+# Layer 2
+W2 = torch.randn((n_hidden, vocab_size),          generator=g) * 0.1
+b2 = torch.randn(vocab_size,                      generator=g) * 0.1
+# BatchNorm parameters
+bngain = torch.randn((1, n_hidden))*0.1 + 1.0
+bnbias = torch.randn((1, n_hidden))*0.1
+
+# Note: I am initializating many of these parameters in non-standard ways
+# because sometimes initializating with e.g. all zeros could mask an incorrect
+# implementation of the backward pass.
+
+parameters = [C, W1, b1, W2, b2, bngain, bnbias]
+print(sum(p.nelement() for p in parameters)) # number of parameters in total
+for p in parameters:
+  p.requires_grad = True
+
+#%%
+max_steps = 1#200000
+batch_size = 32
+n = batch_size 
+
+with torch.no_grad():
+  for i in range(max_steps):
+    # CREATE MINIBATCHES
+    ix = torch.randint(low=0,high=Xtr.shape[0],size=(n,))
+    Xb = Xtr[ix]
+    Yb = Ytr[ix]
+
+    # BEGIN FORWARD PASS
+    emb = C[Xb]
+    embcat = emb.view(emb.shape[0], -1)
+    # LINEAR LAYER
+    hprebn = embcat @ W1 + b1
+    # BATCH NORM
+    bnmean = hprebn.mean(0, keepdim=True)
+    bnvar = hprebn.var(0, keepdim=True, unbiased=True)
+    bnvar_inv = (bnvar + 1e-5)**-0.5
+    bnraw = (hprebn - bnmean) * bnvar_inv
+    hpreact = bngain * bnraw + bnbias
+    # NON LINEARITY
+    h = torch.tanh(hpreact)
+    # OUTPUT LAYER
+    logits = h @ W2 + b2
+    # LOSS FUNCTION
+    loss = F.cross_entropy(logits, Yb)
+
+    # NOW BEGIN BACKWARD
+
+    # loss.backward() .!.
+
+    dlogits = 1/n * (F.softmax(logits, dim=1))
+    dlogits[torch.arange(n), Yb] -= 1/n 
+
+    # BACKWARD OUTPUT LAYER
+    db2 = dlogits.sum(dim=0)
+    dW2 = h.T @ dlogits
+    dh = dlogits @ W2.T
+
+    # BACKWARD NON LINEARITY
+    dhpreact = (1.0 - h**2) * dh
+
+    # BACKWARD BATCH NORM
+    dhprebn = bngain*bnvar_inv/n * (n*dhpreact - dhpreact.sum(0) - n/(n-1) * bnraw * (dhpreact * bnraw).sum(0))
+    dbngain = (dhpreact * bnraw).sum(dim=0, keepdims = True)
+    dbnbias = dhpreact.sum(0, keepdim=True)
+    # BACKWARD LINEAR LAYER
+    dW1 = embcat.T @ dhprebn
+    dembcat = dhprebn @ W1.T
+    db1 = dhprebn.sum(dim=0)
+
+    hot_vec = F.one_hot(Xb, num_classes=27).float()
+    dC = hot_vec.view(-1, vocab_size).T @ dembcat.view(n*block_size,n_embd) 
+
+    grads = [dC, dW1, db1, dW2, db2, dbngain, dbnbias]
+
+    lr = 0.1 if i < 100000 else 0.01
+
+    for p, grad in zip(parameters, grads):
+      p.data += -lr * grad
+
+    if i % 10000 == 0: 
+      print(f'{i:7d}/{max_steps:7d}: {loss.item():.4f}')
+
+# %%
+# CALCULATE FULL TRAINING LOSS
+
+with torch.no_grad():
+  emds = C[Xtr]
+  embcat = emds.view(emds.shape[0], -1)
+  hprebn = embcat @ W1 + b1
+  bnmean = hprebn.mean(0, keepdim=True)
+  bnvar = hprebn.var(0, keepdim=True, unbiased=True)
+  bnvar_inv = (bnvar + 1e-5)**-0.5
+  bnraw = (hprebn - bnmean) * bnvar_inv
+  hpreact = bngain * bnraw + bnbias
+  h = torch.tanh(hpreact)
+  logits = h @ W2 + b2
+  loss = F.cross_entropy(logits, Ytr)
+  print(f'Training loss is: {loss.item():.4f}')
+
+# %%
+# CALCULATE DEV LOSS
+with torch.no_grad():
+  emds = C[Xdev]
+  embcat = emds.view(emds.shape[0], -1)
+  hprebn = embcat @ W1 + b1
+  bnmean = hprebn.mean(0, keepdim=True)
+  bnvar = hprebn.var(0, keepdim=True, unbiased=True)
+  bnvar_inv = (bnvar + 1e-5)**-0.5
+  bnraw = (hprebn - bnmean) * bnvar_inv
+  hpreact = bngain * bnraw + bnbias
+  h = torch.tanh(hpreact)
+  logits = h @ W2 + b2
+  loss = F.cross_entropy(logits, Ydev)
+  print(f'Dev loss is: {loss.item():.4f}')
+
+# %%
+# SAMPLE FROM THE MODEL
+
+num_names = 20
+g = torch.Generator().manual_seed(2147483647 + 10)
+for i in range(num_names):
+  name = ''
+  input = [0, 0, 0]
+  while True:
+    emb = C[torch.tensor(input)]
+    embcat = emb.view(1, -1)
+    hprebn = embcat @ W1 + b1
+    bnvar_inv = (bnvar + 1e-5)**-0.5
+    bnraw = (hprebn - bnmean) * bnvar_inv
+    hpreact = bngain * bnraw + bnbias
+    h = torch.tanh(hpreact)
+    logits = h @ W2 + b2
+
+    probs = logits.softmax(dim=1)
+    ix = torch.multinomial(probs, 1, replacement=True, generator=g).item()
+    name += itos[ix]
+    input = input[1:] + [ix]
+
+    if ix ==0:
+      break
+
+  print(name)
+
 # %%
