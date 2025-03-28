@@ -25,15 +25,23 @@ class BatchNorm1d:
         self.eps = eps
         self.momentum = momentum
         self.mode = mode
-        self.gain = torch.randn((1,dim))
-        self.bias = torch.randn((1,dim))
-        self.E = torch.randn((1,dim))
-        self.var = torch.randn((1,dim))
+        self.gain = torch.ones(dim)
+        self.bias = torch.zeros(dim)
+        self.E = torch.zeros(dim)
+        self.var = torch.ones(dim)
 
     def __call__(self,x):
         if self.mode == 'train':
-            E_running = torch.mean(x, dim = 0, keepdim=True)
-            var_running = 1/(x.shape[0] - 1) * ((x-E_running)**2).sum(dim=0, keepdim=True)
+            if x.ndim == 2:
+                dim = 0
+            elif x.ndim == 3:
+                dim =(0, 1)
+            
+            else:
+                assert('The BatchNorm layer for this dimension of x is not implemented! This might raise unexpected bugs due to wrong broadcasting.')
+            
+            E_running = x.mean(dim, keepdim = True) #torch.mean(x, dim, keepdim=True)
+            var_running = x.var(dim, keepdim = True) # 1/(x.shape[0] - 1) * ((x-E_running)**2).sum(dim, keepdim=True)
 
             self.out = self.gain * ((x-E_running)/(var_running + self.eps)**0.5) + self.bias
 
@@ -41,7 +49,7 @@ class BatchNorm1d:
                 self.E = (1 - self.momentum) * self.E + (self.momentum) * E_running
                 self.var = (1 - self.momentum) * self.var + self.momentum * var_running
 
-        elif self.mode == 'eval':
+        else:
             self.out = self.gain * ((x-self.E)/(self.var + self.eps)**0.5) + self.bias
         
         return self.out
@@ -62,12 +70,22 @@ class Embedding:
     def __call__(self,x):
         self.out = self.w[x]
         return self.out
+    
     def parameters(self):
         return [self.w]
 
-class Flatten:
+class FlattenConsecutive:
+    def __init__(self, n):
+        self.n = n
     def __call__(self, x):
-        return x.view(x.shape[0], -1)
+        B, T, C = x.shape
+        x = x.view(B, T//self.n, C*self.n)   
+
+        if x.shape[1] == 1:
+            x = torch.squeeze(x, dim=1)
+        self.out = x
+        return self.out
+    
     def parameters(self):
         return []
 
@@ -130,28 +148,19 @@ Xtr, Ytr = X[:n1], Y[:n1]
 Xdev, Ydev = X[n1:n2], Y[n1:n2]
 Xt, Yt = X[n2:], Y[n2:]
 # %%
-
-emb_dim = 10
 batch_size = 32
-n_hidden = 200
-
-# layers = [
-#   Linear(emb_dim * block_size, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
-#   Linear(           n_hidden, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
-#   Linear(           n_hidden, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
-#   Linear(           n_hidden, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
-#   Linear(           n_hidden, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
-#   Linear(           n_hidden, len(symbols), bias=False),
-# ]
-
+vocab_size = len(symbols)
+n_embd = 24 # the dimensionality of the character embedding vectors
+n_hidden = 128 # the number of neurons in the hidden layer of the MLP
 model = Sequential([
-    Embedding(len(symbols), emb_dim), Flatten(),
-    Linear(emb_dim * block_size, n_hidden, False), BatchNorm1d(n_hidden), Tanh(),
-    Linear(n_hidden, len(symbols), False)
+  Embedding(vocab_size, n_embd),
+  FlattenConsecutive(2), Linear(n_embd * 2, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
+  FlattenConsecutive(2), Linear(n_hidden*2, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
+  FlattenConsecutive(2), Linear(n_hidden*2, n_hidden, bias=False), BatchNorm1d(n_hidden), Tanh(),
+  Linear(n_hidden, vocab_size, False),
 ])
-
+    
 # %%
-
 for parameter in model.parameters():
     parameter.requires_grad = True
 
@@ -164,7 +173,7 @@ with torch.no_grad():
 
 # %%
 lossi = []
-max_steps = 1#200_000
+max_steps = 200_000
 for i in range(max_steps):
     ix = torch.randint(low=0, high=Xtr.shape[0], size=(batch_size,))
     Xb, Yb = Xtr[ix], Ytr[ix]
@@ -197,11 +206,27 @@ split_loss('train')
 split_loss('dev')
 #%%
 lossi = torch.tensor(lossi).view(-1, 1000).mean(dim=1)
-
-
-# %%
 plt.figure()
 plt.grid()
 plt.plot(torch.arange(lossi.shape[0]), lossi)
-
+# %%
+# sample from the model
+for _ in range(20):
+    
+    out = []
+    context = [0] * block_size # initialize with all ...
+    while True:
+      # forward pass the neural net
+      logits = model(torch.tensor([context]))
+      probs = F.softmax(logits, dim=1)
+      # sample from the distribution
+      ix = torch.multinomial(probs, num_samples=1).item()
+      # shift the context window and track the samples
+      context = context[1:] + [ix]
+      out.append(ix)
+      # if we sample the special '.' token, break
+      if ix == 0:
+        break
+    
+    print(''.join(itos[i] for i in out)) # decode and print the generated word
 # %%
