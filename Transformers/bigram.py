@@ -2,35 +2,8 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-#%%
-text = open('input.txt', 'r').read()
-print(text[:100])
 # %%
-vocab = sorted(list(set(''.join(text))))
-vocab_size = len(vocab)
 
-print(f'We have {vocab_size} symbols')
-print(''.join(vocab))
-#%%
-stoi = {s:i for i,s in enumerate(vocab)}
-itos = {i:s for i,s in enumerate(vocab)}
-encode = lambda data: [stoi[char] for char in ''.join(data)]
-decode = lambda X: [itos[i] for i in X]
-
-# print(encode("hii there"))
-# print(decode(encode("hii there")))
-# %%
-data = torch.tensor(encode(text))
-print(data[:100])
-n = int(len(data)*0.9)
-
-train_data = data[:n]
-val_data = data[n:]
-
-# %%
-torch.manual_seed(1337)
-block_size = 8
-batch_size = 4
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     ix = torch.randint(0, len(data) - block_size, (batch_size, ))
@@ -39,9 +12,47 @@ def get_batch(split):
     
     return x,y
 
-Xb, Yb = get_batch('train')
-print(Xb.shape)
-print(Yb.shape)
+@torch.no_grad()
+def loss_estimation():
+    model.eval()
+    ls = {}
+    for split in ['train', 'eval']:
+        losses = torch.zeros((max_eval_iter))
+        for iter in range(max_eval_iter):
+            x,y = get_batch(split)
+            logits, loss = model(x,y)
+            losses[iter] = loss.item()
+        ls[split] = losses.mean().item()
+    train_loss = ls['train']
+    eval_loss = ls['eval']
+    print(f'Training loss: {train_loss:.4f} Eval loss: {eval_loss:.4f}')
+    model.train()
+    
+#%%
+torch.manual_seed(1337)
+
+text = open('input.txt', 'r').read()
+vocab = sorted(list(set(''.join(text))))
+vocab_size = len(vocab)
+
+stoi = {s:i for i,s in enumerate(vocab)}
+itos = {i:s for i,s in enumerate(vocab)}
+encode = lambda data: [stoi[char] for char in ''.join(data)]
+decode = lambda X: [itos[i] for i in X]
+
+data = torch.tensor(encode(text))
+n = int(len(data)*0.9)
+
+train_data = data[:n]
+val_data = data[n:]
+
+block_size = 8
+batch_size = 32
+lr = 1e-3
+max_steps = 1_000#200_000
+eval_interval = 500
+max_eval_iter = 300
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 #%%
 class BigramLanguageModel(nn.Module):
     def __init__(self, vocab_size, emb_dim):
@@ -66,9 +77,23 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, ix), dim=1)
         return idx
 
-# %%
 model = BigramLanguageModel(vocab_size, vocab_size)
-output = decode(model.generate(idx = torch.zeros((1,1),dtype=torch.long), max_tokens=100).tolist()[0])
-text = ''.join(output)
+optimizer = torch.optim.AdamW(model.parameters(), lr = lr)
 
+#%%
+for _ in range(max_steps):
+    Xb, Yb = get_batch('train')
+    logits, loss = model(Xb,Yb)
+
+    if _ % eval_interval == 0:
+        loss_estimation()
+
+    optimizer.zero_grad(set_to_none=True)
+
+    loss.backward()
+    optimizer.step()
+
+# %%
+output =''.join(decode(model.generate(idx = torch.zeros((1,1),dtype=torch.long), max_tokens=1000).tolist()[0]))
+print(output)
 # %%
